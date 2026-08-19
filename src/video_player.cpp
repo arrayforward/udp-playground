@@ -354,7 +354,7 @@ int main(int argc, char** argv) {
     cfg.id = "player";
     cfg.token = "tok";
     cfg.role = tight::LinkRole::Leaf;
-    cfg.lite_mode = false;  // 1080p 高码率下 lite 单线程 reactor 会因 RS 编码拖慢接收导致 UDP 丢包（端到端实测确认：drop 242；音频-only 下 lite 可行）
+    cfg.lite_mode = false;  // 1080p 高码率下 lite 单线程 reactor 会因 RS 编码拖慢接收导致 UDP 丢包（端到端实测确认：drop 242；音频-only 下 lite 可行，资源占用见 driving_l4s_report.md）
     cfg.report_interval = std::chrono::milliseconds(333);  // 1s 3 次反馈，配合发送端快速收敛
     cfg.late_buffer_ms = 16;  // 迟到 buffer（与发送端一致）：延迟超 P50+16ms 记迟到，超线比例驱动 FEC
     cfg.channel_reliable[2] = true;  // file 通道：可靠 ARQ
