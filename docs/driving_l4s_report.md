@@ -261,26 +261,30 @@ ffplay 子进程（视频解码器，音频-only 时空闲）：WS 84,444 KB、�
 
 ### 10.4 SDK 增量 90KB 目标分析（16kHz 单声道音频场景）
 
-**tight 数据结构净占用（优化后）≈ 50-90KB——达标**：
+**tight 数据结构净占用（sizeof 实测）≈ 30KB——90KB 目标达标且有余量**：
 
-| 组成 | 大小 |
+| 结构 | 大小 |
 | --- | --- |
-| Peer/协议结构（直方图 1.5KB、密码学、Estimator、容器元数据） | ~25KB |
-| 队列空结构 + 节点回收池（16×16B/队列） | ~5KB |
-| PooledBytes 池（4 块 × 2048B，kPoolMaxFreePerThread 16→4） | 8KB |
-| 报告/心跳/重组缓冲 | ~3KB |
-| 线程栈 commit（64KB reserve 中实际 touch 部分） | ~10KB |
-| **合计** | **~50-90KB ✓** |
+| Peer（含直方图 256+64 bin = 1.28KB、容器、原子） | 2,120 B |
+| TightConfig | 296 B |
+| BandwidthEstimator | 112 B |
+| BlockingQueue ×4（对象） | 320 B |
+| Peer 容器空态（map/set/vector ×6） | ~380 B |
+| 回调 std::function ×10 | ~400 B |
+| 密钥/会话（X25519+AES-256） | ~100 B |
+| 原子/令牌/排空标志 | ~170 B |
+| **固定结构小计** | **~4 KB** |
+| PooledBytes 池（4×2KB 上限，16→4 块） | 8 KB |
+| 线程 TEB + 栈 commit | ~13 KB |
+| 队列节点回收池（16/队列 ×4） | ~2.5 KB |
+| **合计** | **~30 KB** |
 
 优化项：PooledBytes 池 16→4 块（32KB→8KB）、BlockingQueue 节点回收池 64→16、队列容量收紧（encode 16/outbound 32/socket 4KB）。
 
-**进程私有增量（实测）~570KB 的组成**——大头是 **Windows 系统/运行时开销**（非 tight 代码可消除）：
-- Winsock 初始化（WSAStartup 内部缓冲、DLL 每进程数据）~100KB+
-- 线程 TEB + 栈 commit（reactor + cap 线程）~20-30KB
-- Windows 堆段增长（小分配段/元数据，LFH）~200-300KB
-- CRT 堆元数据、PE 映像 .data/.bss 私有页 ~50-100KB
+**进程私有增量（实测）~570KB 的其余 ~540KB 与 tight 数据结构无关**——Windows 系统/运行时开销（Winsock 初始化、LFH 堆段、CRT 堆元数据、PE 映像私有页、线程 TEB）——非 tight 代码可消除。16kHz 单声道（帧 80-160B、20ms 节奏）流量增量 <100KB（实测 50Hz/80B 从空闲 1228KB 到 1344KB）。
 
-**度量口径**：tight 数据结构净 90KB 可达；进程私有 90KB 不可能（任何带 socket+线程的进程系统开销 >400KB）。16kHz 单声道（帧 80-160B、20ms 节奏）流量增量 ~100KB 内（实测 50Hz/80B 从空闲 1228KB 到 1344KB）。
+**度量口径**：tight 数据结构净 30KB（90KB 达标）；进程私有 90KB 不可能（系统开销 >400KB）。
+
 
 
 

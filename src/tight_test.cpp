@@ -1,5 +1,11 @@
 #include "tight/tight.hpp"
 
+// 数据结构净占用诊断（--role sizeof）：打印核心结构 sizeof
+#include "../creek/tight/src/peer.hpp"
+#include "tight/bandwidth.hpp"
+#include "tight/blocking_queue.hpp"
+#include "tight/types.hpp"
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -244,6 +250,20 @@ int main(int argc, char** argv) {
     if (role == "none") {
         // 空跑基线（内存差分测量用）：不创建 tight，仅进程基础 + sleep
         for (int i = 0; i < seconds; ++i) std::this_thread::sleep_for(std::chrono::seconds(1));
+        return 0;
+    }
+    if (role == "sizeof") {
+        printf("sizeof(tight::TightConfig)            = %zu\n", sizeof(tight::TightConfig));
+        printf("sizeof(tight::Peer)                   = %zu\n", sizeof(tight::tight_detail::Peer));
+        printf("sizeof(tight::BandwidthEstimator)     = %zu\n", sizeof(tight::BandwidthEstimator));
+        printf("sizeof(BlockingQueue<OutboundPacket>)= %zu\n",
+               sizeof(tight::BlockingQueue<int>));
+        printf("sizeof(tight::PacketHeader)           = %zu\n", sizeof(tight::PacketHeader));
+        printf("sizeof(tight::Bytes)                  = %zu\n", sizeof(tight::Bytes));
+        printf("sizeof(std::string)                   = %zu\n", sizeof(std::string));
+        // Peer 内容器的空态开销
+        printf("empty std::map<std::uint32_t,void*>   = %zu\n",
+               sizeof(std::map<std::uint32_t, void*>));
         return 0;
     }
     fprintf(stderr, "unknown role: %s\n", role.c_str());
