@@ -1,4 +1,4 @@
-// video_sender：Media Foundation 解码 cold.mp4（循环）�?�?tight 带宽估计
+﻿// video_sender：Media Foundation 解码 cold.mp4（循环）�?�?tight 带宽估计
 // 动态码�?H.264 硬编（Intel QSV，ffmpeg.exe h264_qsv 子进程，通道 0）；
 // 音频：ffmpeg.exe 子进程解码音�?�?PCM �?Opus 编码（通道 1）�?//
 // 角色：node（服务端），绑定端口，向发现�?leaf 推送媒体分片�?// 视频编码器：QSV 硬编（硬�?RC 码率收敛 ~1 帧，对比 MF 软编 set_bitrate
@@ -301,20 +301,31 @@ int main(int argc, char** argv) {
                            scaled.data(), (int)kVideoW, (int)kVideoH);
 
                 // 强制关键帧（peer 上线起步 / req-keyframe / 排空恢复）：重启
-                // 编码器 = 新 IDR（QSV 首帧即 IDR）
+                // 编码器 = 新 IDR（QSV 首帧即 IDR）。**冷却 ≥4s**（与码率重启
+                // 共享 last_reset）：播放端 req-keyframe 每 500ms 一次，若每
+                // 次都重启 → QSV 设备崩溃（device failed -17，之后所有实例
+                // 失败 → 10-20s 断流实测）。冷却期内忽略（合并到下一次——
+                // 播放端最多等一个冷却周期拿到新 IDR）。
                 int c = force_idr_count.load();
                 if (c > 0) {
                     force_idr_count.store(c - 1);
-                    if (!venc.force_keyframe()) {
-                        fprintf(stderr, "[src] qsv restart failed (keyframe)\n");
+                    auto now2 = steady_clock::now();
+                    if (now2 - last_reset.load() >= std::chrono::seconds(4)) {
+                        last_reset.store(now2);
+                        if (!venc.force_keyframe()) {
+                            fprintf(stderr, "[src] qsv restart failed (keyframe)\n");
+                        }
                     }
                 }
 
                 // 写 NV12 帧 → ffmpeg（阻塞至消费，按编码速率节流）
                 if (!venc.alive()) {
                     // QSV 设备失败（device failed -17）后新实例也会立即失败，
-                    // 100ms 空转重试无效且刷屏；冷却重试（2s，3 连败后 10s）
-                    // 给驱动恢复时间
+                    // 100ms 空转重试无效且刷屏；冷却退避（2s，3 连败后 30s——
+                    // 设备故障期停止徒劳重启，避免重启风暴进一步损伤驱动）。
+                    // respawn 同样遵守 last_reset 4s 冷却（与码率/IDR 重启
+                    // 共享）：频繁重启本身是设备 -17 的诱因（实测 L4S 场景
+                    // 27-36 次重启 → 10-40s 断流）。
                     static int qsv_fail_count = 0;
                     static auto qsv_retry_until = steady_clock::now();
                     auto now2 = steady_clock::now();
@@ -322,9 +333,14 @@ int main(int argc, char** argv) {
                         std::this_thread::sleep_for(milliseconds(100));
                         continue;
                     }
+                    if (now2 - last_reset.load() < std::chrono::seconds(4)) {
+                        std::this_thread::sleep_for(milliseconds(100));
+                        continue;
+                    }
+                    last_reset.store(now2);
                     if (!venc.force_keyframe()) {
                         ++qsv_fail_count;
-                        auto backoff = qsv_fail_count >= 3 ? seconds(10) : seconds(2);
+                        auto backoff = qsv_fail_count >= 3 ? seconds(30) : seconds(2);
                         qsv_retry_until = now2 + backoff;
                         fprintf(stderr, "[src] qsv respawn failed (x%d), retry in %llds\n",
                                qsv_fail_count, (long long)backoff.count());
@@ -474,7 +490,13 @@ int main(int argc, char** argv) {
     uint64_t prev_vbytes = 0;
     uint64_t last_btl = 0;            // 上次采纳的 btl（死区基准）
     uint64_t last_br = 0;             // 当前编码器码率
-    auto last_reset = steady_clock::now() - std::chrono::seconds(1);  // 允许立即重置
+    // 编码器重启冷却（main 循环码率重启 + 编码线程 force_idr 重启共用）：
+    // 高频重启（播放端 req-keyframe 每 500ms 一次 + 码率阶梯变化）会让 QSV
+    // 设备崩溃（device failed -17，之后所有实例都失败 → 10-20s 断流实测）。
+    // 冷却 ≥4s：码率重启与 IDR 请求共享，冷却期内 IDR 请求合并忽略（播放
+    // 端最多等一个冷却周期拿到新 IDR）。
+    std::atomic<steady_clock::time_point> last_reset{
+        steady_clock::now() - std::chrono::seconds(1)};  // 允许立即重置
     auto last_audio_guard = steady_clock::now() - std::chrono::seconds(1);
     constexpr std::uint32_t kRecoveryBitrate = 1500000;   // 排空期码率（QSV 720p 最低可行，实测 <1.5M 编码器拒绝）
     constexpr std::uint32_t kMinVideoBps = 1500000;       // 视频码率下限（同上，QSV 硬性约束）
@@ -521,7 +543,7 @@ int main(int argc, char** argv) {
             target_bitrate.store(kRecoveryBitrate);
             last_br = kRecoveryBitrate;
             force_idr_count.store(1);
-            last_reset = now;                     // 恢复期结束前禁止正常重置
+            last_reset.store(now);                     // 恢复期结束前禁止正常重置
             in_recovery = true;
             recovery_until = now + seconds(4);    // 低码率窗口：4s
             recovery_resume = true;
@@ -537,7 +559,7 @@ int main(int argc, char** argv) {
             target_bitrate.store(kRecoveryBitrate);
             last_br = kRecoveryBitrate;
             force_idr_count.store(1);
-            last_reset = now;
+            last_reset.store(now);
             in_recovery = true;
             recovery_until = now + seconds(4);
             recovery_resume = true;
@@ -559,7 +581,7 @@ int main(int argc, char** argv) {
                 in_recovery = false;
                 recovery_resume = true;               // 本次恢复保守（封顶 1600k）
                 last_btl = 0;                         // 强制 btl_moved → 重置
-                last_reset = now - std::chrono::seconds(1);  // 允许立即重置
+                last_reset.store(now - std::chrono::seconds(1));  // 允许立即重置
                 printf("[src +%.1fs] recovery window done -> resume normal bitrate\n", ts_sec());
                 fflush(stdout);
             }
@@ -621,9 +643,9 @@ int main(int argc, char** argv) {
             // iGPU 驱动崩溃（device failed -17，之后所有 QSV 实例都失败）
             uint64_t delta = btl > last_btl ? btl - last_btl : last_btl - btl;
             bool btl_moved = delta >= kBitrateHysteresis && delta * 10 > last_btl;
-            if (btl_moved && now - last_reset >= seconds(4)) {
+            if (btl_moved && now - last_reset.load() >= seconds(4)) {
                 last_btl = btl;
-                last_reset = now;
+                last_reset.store(now);
                 last_br = br;
                 target_bitrate.store((uint32_t)br);
                 auto t0_enc = steady_clock::now();
