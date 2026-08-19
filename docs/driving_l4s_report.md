@@ -285,6 +285,19 @@ ffplay 子进程（视频解码器，音频-only 时空闲）：WS 84,444 KB、�
 
 **度量口径**：tight 数据结构净 30KB（90KB 达标）；进程私有 90KB 不可能（系统开销 >400KB）。
 
+### 10.5 最终资源占用统计（lite 音频模式）
+
+| 层级 | 实测 | 说明 |
+| --- | --- | --- |
+| tight 数据结构净（sizeof） | **~30KB** | 90KB 目标达标；Peer 2,120B 最大（直方图 1.28KB） |
+| 流量缓冲增量（16kHz 音频节奏 50Hz/80B） | **~112KB** | 空闲 1,228KB → 音频 1,340KB；主导为 LFH 堆段（~100KB），报文在途仅 ~10KB |
+| SDK 进程私有增量 | ~570KB | 数据 30KB + 流量 ~112KB + 系统 ~430KB（Winsock/堆段/CRT/映像） |
+| 音频终端进程（player）私有 | **~3.1MB** | tight SDK + Opus 解码 + waveOut + 基础；ffplay 不启动（省 ~100MB） |
+| CPU（音频节奏） | ~1.5% 单核（~0.27 kDMIPS） | tight 为 player CPU 主体 |
+
+**池化回退说明**：曾尝试 decode/内部缓冲改 PooledBytes（两级池 512/2048B）替代 LFH 小分配——实测收益微小（~4KB，堆段按峰值提交不受分配次数影响）且波及公共 API（packet_codec）风险大——已回退。保留的 lite 流量缓冲优化：**fragment 前缀原地插入**（`peer.m_lite_mode` 控制，lite 音频小消息省一次缓冲分配拷贝；4 线程保持原 full 缓冲）。
+
+
 
 
 
