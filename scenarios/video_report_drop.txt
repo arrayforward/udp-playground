@@ -1,0 +1,11 @@
+# 报告超时场景（45s，循环执行）：链路严重卡顿仿真
+# 10-20s：报告 100% 丢弃（proxy 丢弃 tight Report 报文）→ 发送端 3×报告
+#      周期（~1s）收不到报告 → btl 乘性下降收敛到保守低码率
+# 其余段：正常（报告恢复 → 恢复台阶自然回升）
+# 验证：btl 在报告超时段快速下降（×0.5/500ms）、视频码率跟降、报告恢复
+#      后台阶回升至满额
+8: bw 30000000; loss 0; delay-off; reorder-prob 0; report-drop 0
+10: bw 30000000; loss 0; delay-off; reorder-prob 0; report-drop 1.0
+8: bw 30000000; loss 0; delay-off; reorder-prob 0; report-drop 0
+10: bw 10000000; loss 0; delay-normal 10 1 0 0 0; l4s on; l4s-threshold 20; report-drop 0
+8: bw 30000000; loss 0; delay-off; reorder-prob 0; report-drop 0

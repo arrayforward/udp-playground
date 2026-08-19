@@ -1,0 +1,22 @@
+# 视频弱网综合场景（总 120s，循环执行）
+# 语法：<持续秒数> : <命令1> ; <命令2> ; ...
+# 支持命令（与 --control 一致）：
+#   bw BPS, wave rect|sine|sawtooth|random, bw-min/bw-max/bw-period/bw-duty
+#   loss R, block R, dup R, corrupt R
+#   delay-prob P [MIN MS] [MAX MS], delay-min MS, delay-max MS
+#   delay-normal <mean_ms> <sigma_ms> [tail_prob tail_min_ms tail_max_ms]（正态+长尾）
+#   reorder-prob R, reorder-max MS
+#   l4s on|off, l4s-threshold MS
+# 未指定的参数继承上一段；循环回到第一段时恢复启动参数。
+
+# 段1：畅通（30s）——无延迟
+30: bw 6000000; loss 0; delay-off; reorder-prob 0
+
+# 段2：轻微劣化（30s）——均值 10ms σ1ms，0.5% 长尾 +50~100ms
+30: bw 4000000; loss 0.005; delay-normal 10 1 0.005 50 100
+
+# 段3：中度劣化 + 长尾加重（30s）——1% 长尾 +50~150ms
+30: bw 2500000; loss 0.02; delay-normal 10 1 0.01 50 150; reorder-prob 0.02; reorder-max 100
+
+# 段4：重度劣化 + 强长尾（30s）——2% 长尾 +80~200ms
+30: bw 1500000; loss 0.04; delay-normal 10 1 0.02 80 200; reorder-prob 0.05; reorder-max 200

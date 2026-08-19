@@ -1,0 +1,16 @@
+# 视频 L4S/ECN 跟随性场景（40s，循环执行）
+# 语法：<持续秒数> : <命令1> ; <命令2> ; ...
+# L4S：proxy 队列积压超 l4s-threshold 即向接收方发 CE 标记报文（替代
+#      丢包——标记让传输协议提前降速）；tight 端 CE 报文计入迟到率，
+#      驱动 late-based 拥塞判定。
+# 带宽档位（2026-08 调整）：正常 30M / 强弱网 10M / 微弱网 15M
+# l4s-threshold 20ms：标准 L4S 队列阈值。帧级迟到判定（帧延迟 vs
+#      帧大小/btl）已吸收关键帧突刺（I 帧传输 40ms 属合理到达），
+#      CE 20ms 阈值照常响应持续超发。
+# 验证：弱网段（10M/15M）无丢包、仅 CE 标记 → btl 收敛、视频不丢帧、
+#      欠载趋零；观察 btl 在 10M（= 种子上限）与 15M 档的跟随性
+8: bw 30000000; loss 0; delay-off; reorder-prob 0; l4s off
+8: bw 10000000; loss 0; delay-normal 10 1 0 0 0; l4s on; l4s-threshold 20
+8: bw 30000000; loss 0; delay-off; reorder-prob 0; l4s off
+8: bw 15000000; loss 0; delay-normal 10 1 0 0 0; l4s on; l4s-threshold 20
+8: bw 30000000; loss 0; delay-off; reorder-prob 0; l4s off

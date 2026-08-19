@@ -1,0 +1,24 @@
+# 构建产物
+build/
+
+# 测试结果日志
+test-results/
+
+# 第三方二进制与测试素材
+ffmpeg/
+media/
+
+# Windows 可执行与对象
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.lib
+*.dll
+
+# 编辑器与系统
+.vscode/
+.idea/
+*.user
+Thumbs.db
+Desktop.ini
