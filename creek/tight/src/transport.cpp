@@ -115,14 +115,14 @@ public:
     SmallThread m_cap_thread;
     std::uint64_t m_last_cap_notified{0};
     // 拥塞排空窗口状态（双模式，slowdown_window_ms > 0 时生效）：
-    //   fast（降幅 >50%：×0.45/×0.30/×0.20）：清空视频积压（clear_outbound）
-    //     + 通道排空 100ms + 回调应用重启编码器出新 IDR，播放端跳到新 IDR
-    //     时间线，追赶/超发积压瞬间归零。排空窗口完成 = 新 IDR 提交发送 +
-    //     下一报告到达（确认）；btl 冻结期独立于窗口状态 = 触发 +3s
-    //     （排空 ~0.7s + 锁定补足——刚跳帧迟到信号失真，不能立即爬升）。
-    //   slow（降幅 20%~50%：×0.65）：按 Q 面积法排空——触发时刻快照超发
-    //     积压 Q（send−recv 积分）与 btl，窗口内 cap = (btl_snap − Q/窗口)，
-    //     3s 排完积压后结束（Q 清零）。
+    //   fast（降幅 >40%：柔表极重档 ×0.50——strength≥50%）：清空视频积压
+    //     （clear_outbound）+ 通道排空 100ms + 回调应用重启编码器出新 IDR，
+    //     播放端跳到新 IDR 时间线，追赶/超发积压瞬间归零。排空窗口完成 =
+    //     新 IDR 提交发送 + 下一报告到达（确认）；btl 冻结期独立于窗口状态
+    //     = 触发 +3s（排空 ~0.7s + 锁定补足——刚跳帧迟到信号失真）。
+    //   slow（降幅 20%~40%：×0.65/×0.75）：按 Q 面积法排空——触发时刻
+    //     快照超发积压 Q（send−recv 积分）与 btl，窗口内 cap = (btl_snap
+    //     − Q/窗口)，3s 排完积压后结束（Q 清零）。
     // 两种模式冻结期内 btl 完全冻结（on_report 全部信号豁免）。
     std::atomic<int> m_evac_mode{0};       // 0=无 1=fast 2=slow
     std::atomic<bool> m_evac_keyframe_sent{false};                 // fast：新 IDR 已提交发送
@@ -138,7 +138,7 @@ public:
     static constexpr auto kEvacTimeout = std::chrono::seconds(5);  // fast 兜底：应用未出 IDR 强制结束排空窗口
     static constexpr auto kEvacFreezeTotal = std::chrono::seconds(3);  // fast 冻结期 = 排空（~0.7s）+ 锁定补足
     static constexpr auto kKeyframeHoldTotal = std::chrono::milliseconds(800);  // 关键帧超发锁定：IDR 传输（~30ms）+ 报告确认（333ms）+ 余量
-    static constexpr double kEvacFastMaxFactor = 0.40;             // 降幅 >60%（因子 <0.40）→ fast；20%~60%（×0.40~0.80）→ slow
+    static constexpr double kEvacFastMaxFactor = 0.60;             // 降幅 >40%（因子 <0.60，柔表极重档 ×0.50）→ fast 排空（清队列+新 IDR）；×0.65/×0.75 → slow 3s Q 排空；×0.90 平滑处理
     // 总发送字节（send_raw 累计，含全部通道/控制）：超发积压累计的数据源
     std::atomic<std::uint64_t> m_tx_bytes{0};
     std::uint64_t m_tx_rate_last_bytes{0};
