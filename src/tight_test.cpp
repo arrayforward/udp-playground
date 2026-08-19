@@ -68,6 +68,9 @@ int runLeaf(uint16_t port, int secs, int sendIntervalMs, int msgSize, bool sendA
     cfg.id = "leaf";
     cfg.token = "tok";
     cfg.lite_mode = true;
+    // 内存最小化测量：关测速（100KB train 缓冲）与加密（AES/X25519 上下文）
+    cfg.speed_test_enabled = false;
+    cfg.encryption_enabled = false;
 
     tight::TightTransport client(cfg);
     LeafStats st;

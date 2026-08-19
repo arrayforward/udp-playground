@@ -6,7 +6,8 @@
 // 经出站队列后即释放。用 thread_local 自由链表复用固定 2048B 块：
 //   - 无锁（每线程自己的自由链表，分配/释放都是本地操作）
 //   - 块大小统一 2048B（覆盖 mtu ≤ ~2000 的报文；超出回退 ::operator new）
-//   - 每线程最多缓存 16 块（32KB），空闲块有界
+//   - 每线程最多缓存 4 块（8KB），空闲块有界——lite 音频场景（16kHz
+//     单声道，帧 80-160B、20ms 节奏）池尖峰极小，4 块余量充足
 // 跨线程释放安全：块在释放线程的链表上回收（内存无归属）。
 
 #include <cstddef>
@@ -17,7 +18,7 @@
 namespace tight::tight_detail {
 
 inline constexpr std::size_t kPoolBlockSize = 2048;
-inline constexpr std::size_t kPoolMaxFreePerThread = 16;
+inline constexpr std::size_t kPoolMaxFreePerThread = 4;
 
 // 每线程自由链表（函数内 thread_local，随线程生命周期）
 inline std::vector<void*>& pool_free_list() {

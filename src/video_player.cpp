@@ -341,8 +341,12 @@ int main(int argc, char** argv) {
         else if (a == "--video-off") audio_only = true;
     }
 
-    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    MFStartup(MF_VERSION);
+    // 音频-only：音频走 Opus（纯 CPU）+ waveOut（mmsystem），不依赖
+    // COM/MF——跳过初始化省 MF 库加载私有内存（~数百 KB）
+    if (!audio_only) {
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        MFStartup(MF_VERSION);
+    }
 
     // 视频解码器（ffplay 子进程）：音频-only 模式不启动——省 ~100MB
     // 私有内存（SDL+ffmpeg 库加载）；音频播放走 AudioOut（waveOut）独立

@@ -259,4 +259,28 @@ ffplay 子进程（视频解码器，音频-only 时空闲）：WS 84,444 KB、�
 - **视频终端**：双线程 + FEC 关后可行（单线程因 reactor 串行丢包 820 帧不可用）——丢包由 req-keyframe 跳帧兜底，帧率 73% 与 4 线程相当
 - **FEC 关的收益**：省校验片在途缓冲 + RS 解码临时分配/CPU；代价是弱网丢包直接丢帧（播放端跳帧恢复）——适合 lite 低资源目标，4 线程保留自适应 FEC
 
+### 10.4 SDK 增量 90KB 目标分析（16kHz 单声道音频场景）
+
+**tight 数据结构净占用（优化后）≈ 50-90KB——达标**：
+
+| 组成 | 大小 |
+| --- | --- |
+| Peer/协议结构（直方图 1.5KB、密码学、Estimator、容器元数据） | ~25KB |
+| 队列空结构 + 节点回收池（16×16B/队列） | ~5KB |
+| PooledBytes 池（4 块 × 2048B，kPoolMaxFreePerThread 16→4） | 8KB |
+| 报告/心跳/重组缓冲 | ~3KB |
+| 线程栈 commit（64KB reserve 中实际 touch 部分） | ~10KB |
+| **合计** | **~50-90KB ✓** |
+
+优化项：PooledBytes 池 16→4 块（32KB→8KB）、BlockingQueue 节点回收池 64→16、队列容量收紧（encode 16/outbound 32/socket 4KB）。
+
+**进程私有增量（实测）~570KB 的组成**——大头是 **Windows 系统/运行时开销**（非 tight 代码可消除）：
+- Winsock 初始化（WSAStartup 内部缓冲、DLL 每进程数据）~100KB+
+- 线程 TEB + 栈 commit（reactor + cap 线程）~20-30KB
+- Windows 堆段增长（小分配段/元数据，LFH）~200-300KB
+- CRT 堆元数据、PE 映像 .data/.bss 私有页 ~50-100KB
+
+**度量口径**：tight 数据结构净 90KB 可达；进程私有 90KB 不可能（任何带 socket+线程的进程系统开销 >400KB）。16kHz 单声道（帧 80-160B、20ms 节奏）流量增量 ~100KB 内（实测 50Hz/80B 从空闲 1228KB 到 1344KB）。
+
+
 

@@ -130,10 +130,11 @@ private:
         return new Node();
     }
 
-    // 节点回收到自由链表（上限 64 个）；调用方需已持锁
+    // 节点回收到自由链表（上限 16 个——lite 音频低流量余量充足，省常驻
+    // 节点内存）；调用方需已持锁
     void recycle_node_locked(Node* node) {
         node->item.reset();
-        if (m_free_count < 64) {
+        if (m_free_count < 16) {
             node->next = m_free_nodes;
             m_free_nodes = node;
             ++m_free_count;
