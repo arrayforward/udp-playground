@@ -1141,6 +1141,7 @@ public:
         peer.m_role = LinkRole::Leaf;
         peer.m_drop_log = m_config.drop_log && !m_lite_mode.load();
         peer.m_retransmit = m_config.retransmit_enabled;
+        peer.m_lite_mode = m_lite_mode.load();   // lite 流量缓冲最小化路径
         // FEC 总开关（fec_enabled=false 或 lite 模式默认关闭）：
         // 发送端 fragmenter 据此不生成校验片（parity_count=0）
         peer.m_fec_disable.store(!m_config.fec_enabled);

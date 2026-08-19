@@ -129,6 +129,9 @@ struct Peer {
     // 读）：RTT 长期 >200ms（长距离或重拥塞）时 FEC 冗余让出带宽——少量
     // 阻塞时冗余恢复有用，大量阻塞时冗余本身挤占带宽加剧拥塞。
     std::atomic<bool> m_fec_disable{false};
+    // 本端 lite 模式（连接创建时按 TightConfig 设置）：lite 下启用流量
+    // 缓冲最小化路径（如分片前缀原地插入——省分配/拷贝/堆段增长）
+    bool m_lite_mode{false};
     // 实际 FEC 冗余统计（encode 线程累计，transport 读取计算冗余率）：
     // 滑动窗口 1s 内发送的数据片/校验片总数，ratio = parity / data。
     // fragmenter 每消息累计；窗口过期（>1s）时计数清零重开。

@@ -58,10 +58,20 @@ void Fragmenter::fragment_and_send(Peer& peer, Bytes payload, std::size_t mtu,
     }
     std::size_t total = payload.size();
     std::uint32_t total_be = to_be32(static_cast<std::uint32_t>(total & 0xFFFFFFFFULL));
-    // 4 字节总长前缀 + 负载：唯一的整体缓冲（分片以区间视图引用，零拷贝）
-    Bytes full(4 + payload.size());
-    std::memcpy(full.data(), &total_be, 4);
-    std::memcpy(full.data() + 4, payload.data(), payload.size());
+    // 4 字节总长前缀：lite 模式原地插入（省一次缓冲分配+拷贝——小消息
+    // 频繁分配是堆段增长源，流量缓冲最小化）；4 线程保持独立 full 缓冲
+    // （大消息原地移动 O(n) 不划算，且内存充裕）。分片以区间视图引用
+    // 整体缓冲（零拷贝）。
+    Bytes full;
+    if (peer.m_lite_mode) {
+        payload.insert(payload.begin(), 4, 0);
+        std::memcpy(payload.data(), &total_be, 4);
+        full.swap(payload);
+    } else {
+        full.resize(4 + total);
+        std::memcpy(full.data(), &total_be, 4);
+        std::memcpy(full.data() + 4, payload.data(), total);
+    }
     std::size_t real_total = full.size();
     std::size_t data_count = (real_total + frag_payload - 1) / frag_payload;
     if (data_count == 0) data_count = 1;
@@ -87,18 +97,6 @@ void Fragmenter::fragment_and_send(Peer& peer, Bytes payload, std::size_t mtu,
             if (late_ratio < 0.008) stage = 1;          // 退出熵公式（<1%×0.8 迟滞）
         }
         parity_count = compute_parity_count_for(late_ratio, data_count, stage);
-    }
-    {
-        static std::atomic<std::uint64_t> dbg_frag_last{0};
-        auto dbg_frag_now = std::chrono::steady_clock::now().time_since_epoch().count();
-        if (dbg_frag_now - dbg_frag_last.load() > 50000000LL) {
-            dbg_frag_last.store(dbg_frag_now);
-            std::printf("DBG frag [%llu] ch=%u total=%zu data=%zu parity=%u stage=%u fecOff=%d\n",
-                        (unsigned long long)tight::unix_millis(),
-                        (unsigned)channel, total, data_count, (unsigned)parity_count,
-                        (unsigned)peer.m_fec_stage, (int)peer.m_fec_disable.load());
-            fflush(stdout);
-        }
     }
     // 通道固定冗余 + 探测冗余：两者都叠加在自适应冗余之上，总校验片
     // 仍受 data_count 约束（最多补足到 data_count 片，超出按 data_count 封顶）。
