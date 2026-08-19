@@ -123,6 +123,9 @@ int main(int argc, char** argv) {
     cfg.token = "tok";
     cfg.role = tight::LinkRole::Node;
     cfg.retransmit_enabled = false;  // 实时视频：纯 FEC 兜底，不重传
+    cfg.lite_mode = true;   // lite 视频模式：标准 lite 队列 + FEC 关（丢帧由播放端 req-keyframe 兜底）
+    cfg.lite_profile = tight::LiteProfile::Video;
+    cfg.fec_enabled = false;  // 视频模式关闭 FEC：接收不再被 RS 解码拖慢（lite 视频可行的前提），省校验片内存/CPU
     cfg.report_interval = std::chrono::milliseconds(333);  // 1s 3 次，带宽估计收敛更快
     cfg.late_buffer_ms = 16;  // 迟到 buffer：视频 33ms 帧周期的一半
     cfg.channel_reliable[2] = true;  // file 通道：可靠 ARQ
@@ -241,6 +244,13 @@ int main(int argc, char** argv) {
     std::atomic<std::uint64_t> target_bitrate{3000 * 1000};
 
     auto t0 = steady_clock::now();
+
+    // 编码器重启冷却（编码线程 force_idr/respawn 与主循环码率重启共享）：
+    // 高频重启（播放端 req-keyframe 每 500ms 一次 + 码率阶梯变化）会让 QSV
+    // 设备崩溃（device failed -17，之后所有实例都失败 → 10-40s 断流实测）。
+    // 冷却 ≥4s：码率重启与 IDR 请求共享，冷却期内 IDR 请求合并忽略。
+    std::atomic<steady_clock::time_point> last_reset{
+        steady_clock::now() - std::chrono::seconds(1)};  // 允许立即重置
 
     // 发送线程：读样本 → 视频缩放 → QSV 硬编 → 发送；音频样本忽略
     // （音频由独立 ffmpeg 子进程线程供给，避免 MF ANY_STREAM 排挤）。
@@ -490,13 +500,6 @@ int main(int argc, char** argv) {
     uint64_t prev_vbytes = 0;
     uint64_t last_btl = 0;            // 上次采纳的 btl（死区基准）
     uint64_t last_br = 0;             // 当前编码器码率
-    // 编码器重启冷却（main 循环码率重启 + 编码线程 force_idr 重启共用）：
-    // 高频重启（播放端 req-keyframe 每 500ms 一次 + 码率阶梯变化）会让 QSV
-    // 设备崩溃（device failed -17，之后所有实例都失败 → 10-20s 断流实测）。
-    // 冷却 ≥4s：码率重启与 IDR 请求共享，冷却期内 IDR 请求合并忽略（播放
-    // 端最多等一个冷却周期拿到新 IDR）。
-    std::atomic<steady_clock::time_point> last_reset{
-        steady_clock::now() - std::chrono::seconds(1)};  // 允许立即重置
     auto last_audio_guard = steady_clock::now() - std::chrono::seconds(1);
     constexpr std::uint32_t kRecoveryBitrate = 1500000;   // 排空期码率（QSV 720p 最低可行，实测 <1.5M 编码器拒绝）
     constexpr std::uint32_t kMinVideoBps = 1500000;       // 视频码率下限（同上，QSV 硬性约束）

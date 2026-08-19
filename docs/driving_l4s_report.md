@@ -228,3 +228,35 @@ ffplay 子进程（视频解码器，音频-only 时空闲）：WS 84,444 KB、�
 - 内存 0-60s 仅 +0.2MB（无泄漏趋势）
 - 对比：lite 高码率视频不可行（RS 解码拖慢接收 → UDP 丢包 drop 242）；音频-only 完全可用（underrun 0、全程连续）
 
+---
+
+## 10. lite 双模式与内存优化（v4）
+
+### 10.1 lite 业务画像（LiteProfile）
+
+`TightConfig::lite_mode` 扩展为两种画像（`LiteProfile`）：
+
+| 画像 | 线程 | 队列/缓冲 | FEC |
+| --- | --- | --- | --- |
+| **Audio** | 单线程（reactor 合并收发） | encode≤16、outbound≤32、send_queue≤64、socket≤4KB、音频队列 48 | 关（Opus PLC 兜底） |
+| **Video** | **双线程**（receiver 独立 recvfrom+协议处理；reactor 管发送/节拍） | encode≤64、outbound≤256、socket≤16KB | **关**（req-keyframe 兜底） |
+
+- `fec_enabled` 总开关：false = 发送不生成校验片（peer.m_fec_disable → fragmenter parity=0）、接收 Parity 跳过（省 RS 解码临时分配/CPU——lite 视频接收不拖慢的前提）
+- 应用侧：`--video-off` 切 Audio（音频终端）、默认 Video（视频终端）
+
+### 10.2 实测
+
+| 项 | 数据 |
+| --- | --- |
+| **lite 音频终端总占用** | **~3.1MB 私有**（player 进程；ffplay 不再启动——省 ~100MB） |
+| tight lite SDK 净占用（差分法） | **~680KB**（消息流负载）/ ~0.5-0.6MB（音频节奏）——优化前 ~1.1MB（**-40%**） |
+| 进程基础基线 | 772KB |
+| lite 视频双线程 | 丢帧 820→225（接收吞吐达标）、wrote 1313（73% ≈ 4 线程）、underrun 2——剩余丢帧为 FEC 关的弱网丢包代价 |
+
+### 10.3 结论
+
+- **音频终端**：极致低内存（3.1MB 私有 / SDK 0.7MB / CPU 1.5%）——嵌入式/资源受限设备可用
+- **视频终端**：双线程 + FEC 关后可行（单线程因 reactor 串行丢包 820 帧不可用）——丢包由 req-keyframe 跳帧兜底，帧率 73% 与 4 线程相当
+- **FEC 关的收益**：省校验片在途缓冲 + RS 解码临时分配/CPU；代价是弱网丢包直接丢帧（播放端跳帧恢复）——适合 lite 低资源目标，4 线程保留自适应 FEC
+
+

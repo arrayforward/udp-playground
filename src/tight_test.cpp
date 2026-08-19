@@ -238,6 +238,11 @@ int main(int argc, char** argv) {
 
     if (role == "node") return runNode(port, seconds, echo);
     if (role == "leaf") return runLeaf(port, seconds, sendIntervalMs, msgSize, sendAdaptive);
-    fprintf(stderr, "bad role: %s (node|leaf)\n", role.c_str());
+    if (role == "none") {
+        // 空跑基线（内存差分测量用）：不创建 tight，仅进程基础 + sleep
+        for (int i = 0; i < seconds; ++i) std::this_thread::sleep_for(std::chrono::seconds(1));
+        return 0;
+    }
+    fprintf(stderr, "unknown role: %s\n", role.c_str());
     return 1;
 }

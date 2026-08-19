@@ -25,6 +25,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -328,6 +329,7 @@ int main(int argc, char** argv) {
     std::string connect_host = "127.0.0.1";
     std::uint16_t connect_port = 9999;
     int run_seconds = 0;
+    bool audio_only = false;  // --video-off：音频-only（lite Audio 单线程最低内存）
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--connect" && i + 1 < argc) {
@@ -336,15 +338,21 @@ int main(int argc, char** argv) {
             connect_host = ep.substr(0, pos);
             connect_port = (uint16_t)atoi(ep.substr(pos + 1).c_str());
         } else if (a == "--seconds" && i + 1 < argc) run_seconds = atoi(argv[++i]);
+        else if (a == "--video-off") audio_only = true;
     }
 
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     MFStartup(MF_VERSION);
 
-    FfplayDecoder dec;
-    if (!dec.init()) { fprintf(stderr, "[player] ffplay init failed\n"); return 1; }
-
-    Queue<VideoFrame> vq;
+    // 视频解码器（ffplay 子进程）：音频-only 模式不启动——省 ~100MB
+    // 私有内存（SDL+ffmpeg 库加载）；音频播放走 AudioOut（waveOut）独立
+    std::unique_ptr<FfplayDecoder> dec;
+    std::unique_ptr<Queue<VideoFrame>> vq;
+    if (!audio_only) {
+        dec = std::make_unique<FfplayDecoder>();
+        if (!dec->init()) { fprintf(stderr, "[player] ffplay init failed\n"); return 1; }
+        vq = std::make_unique<Queue<VideoFrame>>();
+    }
 
     std::atomic<std::uint64_t> rx_bytes{0};
     std::atomic<std::uint64_t> wrote_frames{0}, wrote_bytes{0}, dropped_frames{0};
@@ -354,7 +362,9 @@ int main(int argc, char** argv) {
     cfg.id = "player";
     cfg.token = "tok";
     cfg.role = tight::LinkRole::Leaf;
-    cfg.lite_mode = false;  // 1080p 高码率下 lite 单线程 reactor 会因 RS 编码拖慢接收导致 UDP 丢包（端到端实测确认：drop 242；音频-only 下 lite 可行，资源占用见 driving_l4s_report.md）
+    cfg.lite_mode = true;   // lite：音频-only → Audio 单线程（极致低内存）；视频 → Video 双线程
+    cfg.lite_profile = audio_only ? tight::LiteProfile::Audio : tight::LiteProfile::Video;
+    cfg.fec_enabled = false;  // lite：FEC 关（音频 PLC / 视频 req-keyframe 兜底）
     cfg.report_interval = std::chrono::milliseconds(333);  // 1s 3 次反馈，配合发送端快速收敛
     cfg.late_buffer_ms = 16;  // 迟到 buffer（与发送端一致）：延迟超 P50+16ms 记迟到，超线比例驱动 FEC
     cfg.channel_reliable[2] = true;  // file 通道：可靠 ARQ
@@ -368,13 +378,15 @@ int main(int argc, char** argv) {
         media::ChunkHeader h = media::parse_header(payload.data());
         const std::uint8_t* body = payload.data() + media::kHeaderSize;
         if (h.type == media::kTypeVideo) {
+            // 音频-only 模式无视频解码器：丢弃（不应到达——发送端 --video-off）
+            if (!vq) return;
             VideoFrame vf;
             vf.data.assign(body, body + h.size);
             vf.keyframe = (h.flags & media::kFlagKeyframe) != 0;
             vf.pts_ms = h.pts_ms;
             vf.seq = h.seq;
             rx_bytes.fetch_add(h.size);
-            vq.push(std::move(vf));
+            vq->push(std::move(vf));
         } else if (h.type == media::kTypeAudio) {
             // 音频：seq 乱序/重复过滤 → Opus 解码 → 抖动缓冲队列
             if (aout.aseq_gap(h.seq)) return;
@@ -412,28 +424,32 @@ int main(int argc, char** argv) {
         }
     });
 
-    // 视频喂入线程：乱序过滤 → 写 ffplay stdin（ffplay 负责解码显示）
+    // 视频喂入线程：乱序过滤 → 写 ffplay stdin（ffplay 负责解码显示）。
+    // 音频-only 模式不启动（无视频、无 ffplay——省线程栈 + ffplay 进程）
     std::atomic<bool> stop{false};
     std::atomic<std::uint64_t> drop_ooo{0}, drop_nokey{0};
-    std::thread dthread([&] {
-        VideoFrame vf;
-        std::uint32_t last_seq = 0;
-        bool have_seq = false;
-        bool need_keyframe = true;  // 初始需 IDR；丢帧缺口后也需 IDR 恢复
-        while (vq.pop(vf)) {
-            if (have_seq) {
-                if (vf.seq <= last_seq) { dropped_frames.fetch_add(1); drop_ooo.fetch_add(1); continue; }  // 乱序/重复
-                if (vf.seq > last_seq + 1) need_keyframe = true;  // 有丢帧缺口
+    std::thread dthread;
+    if (!audio_only) {
+        dthread = std::thread([&] {
+            VideoFrame vf;
+            std::uint32_t last_seq = 0;
+            bool have_seq = false;
+            bool need_keyframe = true;  // 初始需 IDR；丢帧缺口后也需 IDR 恢复
+            while (vq->pop(vf)) {
+                if (have_seq) {
+                    if (vf.seq <= last_seq) { dropped_frames.fetch_add(1); drop_ooo.fetch_add(1); continue; }  // 乱序/重复
+                    if (vf.seq > last_seq + 1) need_keyframe = true;  // 有丢帧缺口
+                }
+                if (!vf.keyframe && need_keyframe) { dropped_frames.fetch_add(1); drop_nokey.fetch_add(1); continue; }
+                last_seq = vf.seq;
+                have_seq = true;
+                if (vf.keyframe) need_keyframe = false;
+                if (!dec->write(vf.data.data(), vf.data.size())) break;  // ffplay 退出（管道断开）
+                wrote_frames.fetch_add(1);
+                wrote_bytes.fetch_add(vf.data.size());
             }
-            if (!vf.keyframe && need_keyframe) { dropped_frames.fetch_add(1); drop_nokey.fetch_add(1); continue; }
-            last_seq = vf.seq;
-            have_seq = true;
-            if (vf.keyframe) need_keyframe = false;
-            if (!dec.write(vf.data.data(), vf.data.size())) break;  // ffplay 退出（管道断开）
-            wrote_frames.fetch_add(1);
-            wrote_bytes.fetch_add(vf.data.size());
-        }
-    });
+        });
+    }
 
     // 音频播放线程：300ms 抖动缓冲状态机 + waveOut + PLC
     std::thread athread([&] { aout.run(); });
@@ -457,7 +473,7 @@ int main(int argc, char** argv) {
                    (unsigned long long)dropped_frames.load(),
                    (unsigned long long)drop_ooo.load(),
                    (unsigned long long)drop_nokey.load(),
-                   dec.alive() ? 1 : 0,
+                   (dec && dec->alive()) ? 1 : 0,
                    tx.btl_bw_bps() / 1024.0,
                    (unsigned long long)aout.played.load(),
                    (unsigned long long)aout.underrun.load(),
@@ -474,7 +490,7 @@ int main(int argc, char** argv) {
 
     stop = true;
     aout.stop_flag.store(true);
-    vq.close();
+    if (vq) vq->close();
     if (dthread.joinable()) dthread.join();
     if (athread.joinable()) athread.join();
 
