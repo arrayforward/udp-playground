@@ -243,12 +243,14 @@ private:
     void statsLoop();
     void controlLoop();
     void process(DirStats& st, PktQueue& q, std::atomic<bool>& rescale,
-                 Clock::time_point& drain, const uint8_t* data, size_t n,
+                 Clock::time_point& drain, Clock::time_point& bw_drain,
+                 const uint8_t* data, size_t n,
                  const sockaddr_in& dst, bool disturb);
     // 带宽相关配置变化时调用（须持有 cfgMutex_）：记录变化前后
     // 有效速率，置位待重排标志，由各方向下次收包时执行重排。
     void markBwChanged(double before_bw);
-    void rescaleDirection(PktQueue& q, Clock::time_point& drain, std::atomic<bool>& flag);
+    void rescaleDirection(PktQueue& q, Clock::time_point& drain,
+                          Clock::time_point& bw_drain, std::atomic<bool>& flag);
     sockaddr_in lastClient();
     static bool sameAddr(const sockaddr_in& a, const sockaddr_in& b);
     static int lastErr();
@@ -293,6 +295,12 @@ private:
     std::atomic<bool> started_{false};
     Clock::time_point drainFwd_{};
     Clock::time_point drainRev_{};
+    // 纯带宽积压指针（每方向，CE 判定专用）：只被带宽串行时间（tms）推进
+    // ——delay-normal/reorder 的 due 推后不参与（否则正常延迟仿真被当成
+    // 带宽队列积压 → backlog > l4s 阈值 → CE 误触发 → 发送端过度降速，
+    // 实测 40-52s 渐变段反复 evac）。due/drain 的带宽队列语义不变。
+    Clock::time_point bwDrainFwd_{};
+    Clock::time_point bwDrainRev_{};
 
     Engine engine_;
     PktQueue fwdQ_;

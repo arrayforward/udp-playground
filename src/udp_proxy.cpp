@@ -303,9 +303,6 @@ void UdpProxy::apply_command(const std::string& cmd) {
             s.str(sub + " " + rest);
             double low_bps = 0, dur = 0, period = 0;
             s >> low_bps >> dur >> period;
-            printf("DBG stall parse: sub='%s' rest='%s' low=%f dur=%f period=%f\n",
-                   sub.c_str(), rest.c_str(), low_bps, dur, period);
-            fflush(stdout);
             if (low_bps > 0 && dur > 0 && period > 0) {
                 stall_.active = true;
                 stall_.low_bps = low_bps;
@@ -426,7 +423,7 @@ void UdpProxy::markBwChanged(double before_bw) {
 }
 
 void UdpProxy::rescaleDirection(PktQueue& q, Clock::time_point& drain,
-                                std::atomic<bool>& flag) {
+                                Clock::time_point& bw_drain, std::atomic<bool>& flag) {
     flag.store(false);
     auto now = Clock::now();
     bool was = bwWasEnabled_.load(), now_en = bwNowEnabled_.load();
@@ -434,18 +431,24 @@ void UdpProxy::rescaleDirection(PktQueue& q, Clock::time_point& drain,
     if (!was || !now_en || before <= 0 || after <= 0) {
         q.rebase(now);
         drain = now;
+        bw_drain = now;
         return;
     }
     if (before == after) return;
     double ratio = before / after;
-    printf("DBG rescale: fwd/rev queue=%zu old=%.0f new=%.0f ratio=%.3f\n",
-           q.size(), before, after, ratio);
-    fflush(stdout);
     q.rescale(now, ratio);
     if (drain > now) {
         drain = now + std::chrono::duration_cast<Clock::duration>(
                           std::chrono::duration<double, Clock::period>(
                               (drain - now).count() * ratio));
+    }
+    // 纯带宽积压指针同步缩放（与 drain 一致，CE 判定保持带宽队列语义）
+    if (bw_drain > now) {
+        bw_drain = now + std::chrono::duration_cast<Clock::duration>(
+                             std::chrono::duration<double, Clock::period>(
+                                 (bw_drain - now).count() * ratio));
+    } else {
+        bw_drain = now;
     }
 }
 
@@ -499,10 +502,11 @@ void UdpProxy::controlLoop() {
 }
 
 void UdpProxy::process(DirStats& st, PktQueue& q, std::atomic<bool>& rescale,
-                       Clock::time_point& drain, const uint8_t* data, size_t n,
+                       Clock::time_point& drain, Clock::time_point& bw_drain,
+                       const uint8_t* data, size_t n,
                        const sockaddr_in& dst, bool disturb) {
     if (rescale.load(std::memory_order_relaxed)) {
-        rescaleDirection(q, drain, rescale);
+        rescaleDirection(q, drain, bw_drain, rescale);
     }
     DisturbConfig cfg;
     {
@@ -585,16 +589,23 @@ void UdpProxy::process(DirStats& st, PktQueue& q, std::atomic<bool>& rescale,
         double bw = engine_.bandwidth(cfg);
         auto tms = std::chrono::duration_cast<Clock::duration>(
             std::chrono::duration<double, std::milli>((double)n * 8.0 * 1000.0 / bw));
+        // 带宽串行（due/drain 原语义不变）：串行时间 tms 推进发送队列。
+        // CE 判定用独立的纯带宽积压指针 bw_drain（只被 tms 推进——delay/
+        // reorder 的 due 推后不参与，正常延迟仿真不算拥塞积压）。
         Clock::time_point base = std::max(due, drain);
         // 调度前的既有积压指针（drain 领先 now 的量 = 队列积压时延）。
         Clock::time_point prev_drain = drain;
         due = base + tms;
         drain = due;
-        // L4S 标记：既有积压超阈值 → 给接收方发 CE 标记（标记替代丢包，
-        // 让传输协议提前降速）。队列空时 drain≤now 不标记；带宽下降→
-        // 队列起→标记；传输降速→队列清→自动停。
+        // 纯带宽积压：只按串行时间推进（delay/reorder 不影响）
+        Clock::time_point bw_base = std::max(bw_drain, Clock::now());
+        Clock::time_point prev_bw = bw_drain;
+        bw_drain = bw_base + tms;
+        // L4S 标记：带宽队列积压超阈值 → 给接收方发 CE 标记（标记替代
+        // 丢包，让传输协议提前降速）。backlog 基于纯带宽积压（bw_drain）
+        // ——正常延迟（delay-normal 仿真）不算拥塞。
         if (l4s) {
-            auto backlog = prev_drain - Clock::now();
+            auto backlog = prev_bw - Clock::now();
             if (backlog > std::chrono::duration_cast<Clock::duration>(
                               std::chrono::duration<double, std::milli>(cfg.l4s_threshold_ms))) {
                 uint32_t magic = tight::tight_detail::ecn::kCeMarkMagic;
@@ -653,13 +664,13 @@ void UdpProxy::recvLoop() {
             continue;
         }
         if (sameAddr(src, target_)) {
-            DisturbConfig cfg; { std::lock_guard<std::mutex> lk(cfgMutex_); cfg = cfg_; } process(revStats_, revQ_, rescaleRev_, drainRev_, buf.data(), (size_t)r, lastClient(), !cfg.clean_reverse);
+            DisturbConfig cfg; { std::lock_guard<std::mutex> lk(cfgMutex_); cfg = cfg_; } process(revStats_, revQ_, rescaleRev_, drainRev_, bwDrainRev_, buf.data(), (size_t)r, lastClient(), !cfg.clean_reverse);
         } else {
             {
                 std::lock_guard<std::mutex> lk(clientM_);
                 lastClient_ = src;
             }
-            process(fwdStats_, fwdQ_, rescaleFwd_, drainFwd_, buf.data(), (size_t)r, target_, true);
+            process(fwdStats_, fwdQ_, rescaleFwd_, drainFwd_, bwDrainFwd_, buf.data(), (size_t)r, target_, true);
         }
     }
 }

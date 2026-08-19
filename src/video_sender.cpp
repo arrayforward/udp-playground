@@ -341,7 +341,7 @@ int main(int argc, char** argv) {
                     auto chunk = media::pack_chunk(media::kTypeVideo, kf ? media::kFlagKeyframe : 0,
                                                    vseq, (uint64_t)pts / 10000,
                                                    au.data(), (std::uint32_t)au.size());
-                    if (tx.send(pid, std::move(chunk))) {
+                    if (tx.send_video(pid, std::move(chunk), kf)) {
                         sent_bytes.fetch_add(au.size());
                         sent_vframes.fetch_add(1);
                         // avg 帧大小统计排除 SPS/PPS 等小碎片（QSV 输出
@@ -475,19 +475,12 @@ int main(int argc, char** argv) {
     uint64_t last_btl = 0;            // 上次采纳的 btl（死区基准）
     uint64_t last_br = 0;             // 当前编码器码率
     auto last_reset = steady_clock::now() - std::chrono::seconds(1);  // 允许立即重置
-    auto last_congest_clear = steady_clock::now() - std::chrono::seconds(1);
     auto last_audio_guard = steady_clock::now() - std::chrono::seconds(1);
-    std::atomic<std::uint64_t> congest_clear{0};  // 止损清空次数（诊断）
-    // 积压止损：带宽下降时激进排空。触发阈值 ~2.5s 视频量（1.5Mbps ≈
-    // 500 分片）+ 2s 冷却。排空动作：清队列 + 重启编码器（低码率 + 新
-    // IDR）+ 低码率保持 4s，结束后保守恢复（封顶 1600k）。
-    constexpr std::size_t kCongestQueue = 500;
     constexpr std::uint32_t kRecoveryBitrate = 1500000;   // 排空期码率（QSV 720p 最低可行，实测 <1.5M 编码器拒绝）
     constexpr std::uint32_t kMinVideoBps = 1500000;       // 视频码率下限（同上，QSV 硬性约束）
     bool in_recovery = false;        // 排空恢复期（低码率发关键帧，禁正常重置）
     bool recovery_resume = false;    // 恢复期结束后的首次评估保守（封顶 1600k）
     auto recovery_until = steady_clock::now();
-    uint64_t prev_send_fail = 0;   // sendFail 增量检测（队列真满背压的强信号）
     // 日志时间戳 helper：相对启动秒（看 btl 与编码码率的跟随性）
     auto ts_sec = [&]() -> double {
         return duration_cast<milliseconds>(steady_clock::now() - t0).count() / 1000.0;
@@ -509,35 +502,31 @@ int main(int argc, char** argv) {
             fflush(stdout);
         }
     });
+    // 拥塞排空窗口（fast：大幅降速清队列）：tight 已丢全部待发视频帧并
+    // 排空通道，应用重启编码器（新 IDR + 低码率）——播放端跳到新 IDR
+    // 时间线，积压瞬间归零。回调只置标志（tight 接收/轮询线程调用）。
+    std::atomic<bool> evac_req{false};
+    tx.set_evac_keyframe_callback([&] {
+        evac_req.store(true);
+    });
     while (run_seconds == 0 || duration_cast<seconds>(steady_clock::now() - t0).count() < run_seconds) {
         std::this_thread::sleep_for(milliseconds(250));
         auto now = steady_clock::now();
-        // 出站队列积压止损：网络变差、编码器尚未降码率的窗口内，tight 发送
-        // 队列会先阻塞。排空视频通道（drain_channel：出队即丢，音频/文件/
-        // 数据通道完全不受影响）并重启编码器（低码率 + 新 IDR），让链路
-        // 快速投递最新关键帧。
-        uint64_t sf_now = send_fail.load();
-        uint64_t sf_delta = sf_now - prev_send_fail;
-        bool send_backpress = sf_delta >= 2;
-        prev_send_fail = sf_now;
-        if ((tx.outbound_queue_size() > kCongestQueue || send_backpress) &&
-            now - last_congest_clear >= seconds(2)) {  // 2s 冷却
-            last_congest_clear = now;
-            std::size_t congested_sz = tx.outbound_queue_size();
-            tx.drain_channel(0);   // 排空视频通道 100ms（在途旧帧出队即丢）
-            // 重启编码器：低码率 + 新 IDR 一步完成（QSV 首帧即 IDR；
-            // 重启 ~300ms > 排空 100ms，新 IDR 不会被误丢）
+        // 拥塞排空窗口（fast：降幅 >50% 的剧烈降速）：tight 已清空视频
+        // 积压并排空通道，应用重启编码器（低码率 + 新 IDR）——播放端跳到
+        // 新 IDR 时间线。新 IDR 提交后 tight 结束窗口（下一报告确认）。
+        if (evac_req.exchange(false)) {
+            loan_penalty.store(false);   // 快排接管止损（破产清算）：恢复推送——贷款耗尽置的暂停标志由 fast 排空解除
             venc.set_bitrate(kRecoveryBitrate);
             target_bitrate.store(kRecoveryBitrate);
             last_br = kRecoveryBitrate;
+            force_idr_count.store(1);
             last_reset = now;                     // 恢复期结束前禁止正常重置
             in_recovery = true;
             recovery_until = now + seconds(4);    // 低码率窗口：4s
-            congest_clear.fetch_add(1);
-            printf("[src +%.1fs] queue congested(%zu sf+%llu) -> cleared + QSV restart @ %u bps, recover in 4s (x%llu)\n",
-                   ts_sec(), congested_sz, (unsigned long long)sf_delta,
-                   (unsigned)kRecoveryBitrate,
-                   (unsigned long long)congest_clear.load());
+            recovery_resume = true;
+            printf("[src +%.1fs] evac -> QSV restart @ %u bps (keyframe)\n",
+                   ts_sec(), (unsigned)kRecoveryBitrate);
             fflush(stdout);
         }
         // 贷款恢复（tight 债务清零）：重启编码器（低码率 + 新 IDR）快速

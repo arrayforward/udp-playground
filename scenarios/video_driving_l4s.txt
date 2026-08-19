@@ -1,0 +1,35 @@
+# 开车场景（渐变版，有 L4S，60s，循环执行）
+# 语法：<持续秒数> : <命令1> ; <命令2> ; ...
+# 行程（所有网络状态转换均为渐变阶梯，2s 一档）：
+# 1) 地下车库出口（0-10s）——信号遮挡逐级好转：5M+丢包2%+长尾 → 6M
+#    → 8M → 10M → 12M，干扰（丢包/抖动/报告丢失）同步衰减
+# 2) 人群密集（10-20s）——10M 稳定拥塞 + L4S CE 标记，渐出人群带宽
+#    小幅回升（10M→11M→12M）
+# 3) 正常网络（20-30s）——出城信号渐好（15M→20M→满），30M 满速稳定
+# 4) 城市→郊区渐变（30-40s）——带宽逐档衰减 24M→18M→13M→8M→4M，
+#    L4S 全程开启让发送端持续感知带宽下限
+# 5) 恢复正常（40-60s）——4M→6M→9M→13M→18M→24M→30M 逐档回升
+#    （12s 渐变），后 8s 满速稳定
+2: bw 5000000; loss 0.02; delay-normal 25 8 0.03 80 200; report-drop 0.2
+2: bw 6000000; loss 0.015; delay-normal 22 7 0.02 70 160; report-drop 0.15
+2: bw 8000000; loss 0.01; delay-normal 18 6 0.01 60 120; report-drop 0.1
+2: bw 10000000; loss 0.005; delay-normal 15 4 0 0 0; report-drop 0.05
+2: bw 12000000; loss 0; delay-normal 12 3 0 0 0; report-drop 0
+4: bw 10000000; loss 0; delay-normal 10 2 0 0 0; l4s on; l4s-threshold 20
+3: bw 11000000; loss 0; delay-normal 10 2 0 0 0; l4s on
+3: bw 12000000; loss 0; delay-normal 9 2 0 0 0; l4s on
+3: bw 15000000; loss 0; delay-normal 8 1 0 0 0; l4s off
+3: bw 20000000; loss 0; delay-off; l4s off
+4: reset; l4s off
+2: bw 24000000; loss 0; delay-normal 10 2 0 0 0; l4s on; l4s-threshold 20
+2: bw 18000000; loss 0; delay-normal 11 2 0 0 0; l4s on
+2: bw 13000000; loss 0; delay-normal 12 2 0 0 0; l4s on
+2: bw 8000000; loss 0; delay-normal 13 2 0 0 0; l4s on
+2: bw 4000000; loss 0; delay-normal 15 2 0 0 0; l4s on
+2: bw 6000000; loss 0; delay-normal 14 2 0 0 0; l4s on
+2: bw 9000000; loss 0; delay-normal 13 2 0 0 0; l4s on
+2: bw 13000000; loss 0; delay-normal 12 2 0 0 0; l4s on
+2: bw 18000000; loss 0; delay-normal 11 2 0 0 0; l4s on
+2: bw 24000000; loss 0; delay-normal 10 2 0 0 0; l4s on
+2: bw 30000000; loss 0; delay-normal 9 2 0 0 0; l4s on
+8: reset; l4s off

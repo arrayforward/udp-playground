@@ -13,6 +13,10 @@
 
 namespace tight::tight_detail {
 
+// CE 占比最小样本门槛：报告窗口内数据报文+CE 报文总数 < 该值时不判 CE
+// （发送受限/视频暂停期小分母放大 CE 尾流 → 比值虚高误判拥塞）。
+constexpr std::uint64_t kMinCeSamples = 20;
+
 Bytes Report::build_payload(Peer& peer, std::chrono::milliseconds report_interval,
                             std::uint32_t late_buffer_ms, bool lite_mode) {
     auto now = std::chrono::steady_clock::now();
@@ -90,15 +94,6 @@ Bytes Report::build_payload(Peer& peer, std::chrono::milliseconds report_interva
             peer.m_missing_channel.erase(first->first);
             peer.m_missing_seqs.erase(first);
         }
-        static std::atomic<std::uint64_t> dbg_nack_last{0};
-        auto dbg_nack_now = std::chrono::steady_clock::now().time_since_epoch().count();
-        if (!lost_seqs.empty() && dbg_nack_now - dbg_nack_last.load() > 200000000LL) {
-            dbg_nack_last.store(dbg_nack_now);
-            std::printf("DBG nack: seqs=%zu ack=%u th=%u rtt=%u\n",
-                        lost_seqs.size(), peer.m_next_expected_seq,
-                        (unsigned)loss_threshold, (unsigned)peer.m_sender_rtt_us);
-            fflush(stdout);
-        }
 
         // Late-packet ratio over this report interval (slow-packet rate).
         // 迟到 = 延迟超线 ∪ 丢失：丢包 = 永远迟到（实时语义：对播放端
@@ -172,13 +167,6 @@ Bytes Report::build_payload(Peer& peer, std::chrono::milliseconds report_interva
         // 延迟曲线直方图清零（333ms 窗口刷新；迟到线 m_late_line_us 保留）
         peer.m_latency_hist.fill(0);
         peer.m_hist_samples = 0;
-        if (late_buffer_ms > 0 && (p50_us > 0 || line_us > 0)) {
-            std::printf("DBG report: p50=%lluus line=%lluus p999=%lluus late=%.2f%% off=%lld rtt=%u\n",
-                        (unsigned long long)p50_us, (unsigned long long)line_us,
-                        (unsigned long long)p999_us, late_ratio * 100.0,
-                        (long long)peer.m_clock_offset_us, (unsigned)peer.m_sender_rtt_us);
-            fflush(stdout);
-        }
 
         // Finalize any in-flight speed-test train and attach the measured
         // inbound bandwidth once so the sender can seed its estimator.
@@ -220,15 +208,19 @@ Bytes Report::build_payload(Peer& peer, std::chrono::milliseconds report_interva
             recv_rate = peer.m_recv_bytes * 1000ULL / interval_s;
         }
         // L4S CE 占比：ce_marks / (ce_marks + data_pkts)，×10000 打包。
+        // 最小样本门槛：data_pkts 极少（发送被令牌限制/视频暂停期）+ CE
+        // 尾流（前一段 l4s 的残留报文延迟处理）时，比值被小分母放大虚高
+        // （实测 2-3 个 CE / ~15 报文 = 13-25% → 误判拥塞 → 恢复段反复降）。
+        // 样本 ≥kMinCeSamples 才判 CE——正常发送期（≥150 报文/s）333ms
+        // 窗口内 ≥50 报文，门槛 20 不影响真实 CE 判定。
         std::uint64_t ce_marks = peer.m_ce_marks;
         std::uint64_t data_pkts = peer.m_data_pkts;
         std::uint64_t total = ce_marks + data_pkts;
-        std::uint64_t ce_ratio_10000 = total > 0 ? (ce_marks * 10000ULL / total) : 0;
-        if (ce_ratio_10000 > 10000) ce_ratio_10000 = 10000;
-        std::printf("DBG report: recv_bytes=%llu rate=%llu ce=%llu/%llu\n",
-                    (unsigned long long)peer.m_recv_bytes, (unsigned long long)recv_rate,
-                    (unsigned long long)ce_marks, (unsigned long long)data_pkts);
-        fflush(stdout);
+        std::uint64_t ce_ratio_10000 = 0;
+        if (total >= kMinCeSamples) {
+            ce_ratio_10000 = total > 0 ? (ce_marks * 10000ULL / total) : 0;
+            if (ce_ratio_10000 > 10000) ce_ratio_10000 = 10000;
+        }
         peer.m_recv_bytes = 0;
         peer.m_ce_marks = 0;
         peer.m_data_pkts = 0;
@@ -431,14 +423,6 @@ ReportResult Report::handle(Peer& peer, const Bytes& payload, const ResendCallba
     }
 
     auto now = std::chrono::steady_clock::now();
-    static std::atomic<std::uint64_t> dbg_resend_last{0};
-    auto dbg_resend_now = std::chrono::steady_clock::now().time_since_epoch().count();
-    if (!lost_seqs.empty() && dbg_resend_now - dbg_resend_last.load() > 500000000LL) {
-        dbg_resend_last.store(dbg_resend_now);
-        std::printf("DBG resend: snap=%zu no_pending=%zu ack=%u pending_total=%zu\n",
-                    snapshot.size(), no_pending, (unsigned)ack_seq, peer.m_pending.size());
-        fflush(stdout);
-    }
     for (auto& kv : snapshot) {
         resend(&peer, kv.second.m_header, kv.second.m_payload);
         std::lock_guard<std::mutex> lock(peer.m_mu);
