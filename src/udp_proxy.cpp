@@ -270,8 +270,11 @@ void UdpProxy::apply_command(const std::string& cmd) {
         cfg_.delay_enabled = false;
         cfg_.delay_normal = false;
     } else if (key == "reorder-prob") {
-        cfg_.reorder_enabled = next() > 0;
-        cfg_.reorder_prob = cfg_.reorder_enabled ? cfg_.reorder_prob : 0;
+        // 修复：此前只把解析值用于 >0 判断、从未写回 reorder_prob（恒 0），
+        // 场景的 reorder-prob 0.3 实际从未生效（stats reorder=0）
+        double p = next();
+        cfg_.reorder_prob = p;
+        cfg_.reorder_enabled = p > 0;
     } else if (key == "reorder-max") {
         cfg_.reorder_enabled = true;
         cfg_.reorder_max_ms = (uint32_t)nextU();
@@ -650,7 +653,7 @@ void UdpProxy::recvLoop() {
     std::vector<uint8_t> buf(65536);
     while (!stop_.load(std::memory_order_relaxed)) {
         sockaddr_in src{};
-        int slen = (int)sizeof(src);
+        socklen_t slen = (socklen_t)sizeof(src);
         int r = (int)recvfrom(sock_, reinterpret_cast<char*>(buf.data()), (int)buf.size(), 0,
                               reinterpret_cast<sockaddr*>(&src), &slen);
         if (r < 0) {

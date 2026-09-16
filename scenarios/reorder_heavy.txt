@@ -1,0 +1,4 @@
+# 双路径不等价（聚合/多径重乱序）：18M 水位、30% 乱序 100ms
+20: bw 18000000; loss 0.01; delay-normal 20 6 0.01 50 110; reorder-prob 0.3; reorder-max 100
+20: bw 18000000; loss 0.01; delay-normal 20 6 0.01 50 110; reorder-prob 0.15; reorder-max 60
+20: bw 18000000; loss 0.01; delay-normal 20 6 0.01 50 110; reorder-prob 0.3; reorder-max 100
