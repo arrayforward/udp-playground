@@ -1,0 +1,44 @@
+# 开车场景·严苛版（无 L4S，90s，循环执行）
+# 设计目标：在真实世界约束内（丢包≤20%、延迟≤241ms）把系统的薄弱点全部
+# 压一遍——断流边缘、锯齿震荡、隧道深 dip、快速回升、随机丢包
+# 语法：<持续秒数> : <命令1> ; <命令2> ; ...
+# 行程：
+# 1) 地库陡坡（0-10s）——比标准版更狠：3M+5%丢包+长尾延迟+报告丢失
+# 2) 断流边缘（10-14s）——800k+10%丢包：stall 三重闸的极限考验
+#    （崩底但不能自锁，恢复探测要能爬回来）
+# 3) 锯齿震荡（14-24s）——4M↔12M 每2s换向：码率呼吸压力测试
+#    （absorb 过降+AI 提前毕业的往返触发器）
+# 4) 人群 bufferbloat（24-32s）——6M+80ms 排队延迟：delay 证据主导降速
+# 5) 高速骤降（32-38s）——24M 干净 → 2M（2s 一档）：dip 浅降扛骤降
+# 6) 隧道（38-42s）——500k+15%丢包：深 dip，stall 防崩底再验证
+# 7) 出隧道快恢复（42-52s）——2M→8M→16M→30M：好网络快爬（×2.0）验证
+# 8) 随机丢包（52-60s）——12M+3% 随机丢包：A 方案不降速（FEC 对抗）
+# 9) 干净高速（60-90s）——30M 满速：稳态质量与零卡顿基准
+2: bw 3000000; loss 0.05; delay-normal 35 10 0.05 120 240; report-drop 0.25
+2: bw 4000000; loss 0.04; delay-normal 30 9 0.04 100 220; report-drop 0.2
+2: bw 5000000; loss 0.03; delay-normal 25 8 0.03 80 200; report-drop 0.15
+2: bw 6000000; loss 0.02; delay-normal 20 6 0.02 60 160; report-drop 0.1
+2: bw 8000000; loss 0.01; delay-normal 15 4 0.01 40 120; report-drop 0.05
+2: bw 800000; loss 0.10; delay-normal 40 10 0.05 150 240; report-drop 0.1
+2: bw 1200000; loss 0.08; delay-normal 30 8 0.03 100 200; report-drop 0.05
+2: bw 4000000; loss 0.01; delay-normal 15 4 0 0 0; report-drop 0
+2: bw 12000000; loss 0.01; delay-normal 12 3 0 0 0; report-drop 0
+2: bw 4000000; loss 0.01; delay-normal 15 4 0 0 0; report-drop 0
+2: bw 12000000; loss 0.01; delay-normal 12 3 0 0 0; report-drop 0
+2: bw 4000000; loss 0.01; delay-normal 15 4 0 0 0; report-drop 0
+4: bw 6000000; loss 0; delay-normal 80 10 0.02 150 240
+4: bw 6000000; loss 0; delay-normal 80 10 0.02 150 240
+2: bw 24000000; loss 0; delay-normal 8 1 0 0 0
+2: bw 12000000; loss 0; delay-normal 10 2 0 0 0
+2: bw 2000000; loss 0; delay-normal 15 3 0 0 0
+2: bw 500000; loss 0.15; delay-normal 45 12 0.05 180 240; report-drop 0.1
+2: bw 500000; loss 0.15; delay-normal 45 12 0.05 180 240; report-drop 0.1
+2: bw 2000000; loss 0.02; delay-normal 25 6 0.02 80 160; report-drop 0.05
+2: bw 8000000; loss 0.005; delay-normal 15 3 0 0 0; report-drop 0
+2: bw 16000000; loss 0; delay-normal 10 2 0 0 0; report-drop 0
+4: bw 30000000; loss 0; delay-normal 8 1 0 0 0
+4: bw 12000000; loss 0.03; delay-normal 15 3 0 0 0
+4: bw 12000000; loss 0.03; delay-normal 15 3 0 0 0
+10: reset
+10: reset
+10: reset

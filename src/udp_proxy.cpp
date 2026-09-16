@@ -582,9 +582,14 @@ void UdpProxy::process(DirStats& st, PktQueue& q, std::atomic<bool>& rescale,
         }
     }
 
+    // 乱序推后先记账、暂不并入 due：多径不等价下慢径报文不阻塞快径
+    // 报文——若把 reorder 推后算进带宽串行的 drain，30% 乱序报文会把
+    // 后续所有报文堵在队尾（HoL 停顿传染），乱序退化为全队停顿
+    // （实测 reorder_realistic 卡顿率 12.56% 的主因之一）。
+    std::uint32_t reorder_ms = 0;
     if (disturb && cfg.reorder_enabled && u01(engine_.rng()) < cfg.reorder_prob) {
         std::uniform_int_distribution<uint32_t> d(0, cfg.reorder_max_ms);
-        due += std::chrono::milliseconds(d(engine_.rng()));
+        reorder_ms = d(engine_.rng());
         st.reordered.fetch_add(1);
     }
 
@@ -618,6 +623,10 @@ void UdpProxy::process(DirStats& st, PktQueue& q, std::atomic<bool>& rescale,
             }
         }
     }
+
+    // 乱序推后在带宽串行之后施加：不参与 drain 推进（见上方注释），
+    // due 晚于后续报文时由优先队列自然形成超車——真乱序。
+    if (reorder_ms > 0) due += std::chrono::milliseconds(reorder_ms);
 
     bool dup = disturb && u01(engine_.rng()) < cfg.dup_rate;
     bool corrupt = disturb && u01(engine_.rng()) < cfg.corrupt_rate;

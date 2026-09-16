@@ -1,0 +1,3 @@
+# 隔离对照 D：18M + 仅真实包络乱序（2%/20ms 与 5%/40ms 各半）
+30: bw 18000000; reorder-prob 0.02; reorder-max 20
+30: bw 18000000; reorder-prob 0.05; reorder-max 40
