@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdio>
+#include <ctime>
 #include <fstream>
 #include <sstream>
 
@@ -286,6 +287,11 @@ void UdpProxy::apply_command(const std::string& cmd) {
         iss >> sub;
         if (sub == "on") cfg_.l4s_enabled = true;
         else if (sub == "off") cfg_.l4s_enabled = false;
+    } else if (key == "l4s-reflect") {
+        std::string sub;
+        iss >> sub;
+        if (sub == "on") cfg_.l4s_reflect = true;
+        else if (sub == "off") cfg_.l4s_reflect = false;
     } else if (key == "l4s-threshold") {
         double v = next();
         if (v >= 0) cfg_.l4s_threshold_ms = v;
@@ -507,7 +513,7 @@ void UdpProxy::controlLoop() {
 void UdpProxy::process(DirStats& st, PktQueue& q, std::atomic<bool>& rescale,
                        Clock::time_point& drain, Clock::time_point& bw_drain,
                        const uint8_t* data, size_t n,
-                       const sockaddr_in& dst, bool disturb) {
+                       const sockaddr_in& dst, const sockaddr_in& reflect_src, bool disturb) {
     if (rescale.load(std::memory_order_relaxed)) {
         rescaleDirection(q, drain, bw_drain, rescale);
     }
@@ -617,8 +623,11 @@ void UdpProxy::process(DirStats& st, PktQueue& q, std::atomic<bool>& rescale,
             if (backlog > std::chrono::duration_cast<Clock::duration>(
                               std::chrono::duration<double, std::milli>(cfg.l4s_threshold_ms))) {
                 uint32_t magic = tight::tight_detail::ecn::kCeMarkMagic;
+                // reflect 模式：L4CE 回注发送方（WebRTC 客户端读不到 CE 的
+                // 替代反馈路径）；默认发接收方（tight 标准行为）
+                const sockaddr_in& ceDst = cfg.l4s_reflect ? reflect_src : dst;
                 sendto(sock_, reinterpret_cast<const char*>(&magic), sizeof(magic), 0,
-                       reinterpret_cast<const sockaddr*>(&dst), (int)sizeof(dst));
+                       reinterpret_cast<const sockaddr*>(&ceDst), (int)sizeof(ceDst));
                 st.ce_marked.fetch_add(1);
             }
         }
@@ -665,6 +674,7 @@ void UdpProxy::recvLoop() {
         socklen_t slen = (socklen_t)sizeof(src);
         int r = (int)recvfrom(sock_, reinterpret_cast<char*>(buf.data()), (int)buf.size(), 0,
                               reinterpret_cast<sockaddr*>(&src), &slen);
+        recvWake_.fetch_add(1);   // 布点：recv 线程每次唤醒
         if (r < 0) {
             int e = lastErr();
 #ifdef _WIN32
@@ -672,17 +682,18 @@ void UdpProxy::recvLoop() {
 #else
             if (e == EAGAIN || e == EWOULDBLOCK) continue;
 #endif
+            recvErr_.fetch_add(1); lastRecvErr_.store(e);   // 布点：非常规错误
             if (stop_.load(std::memory_order_relaxed)) break;
             continue;
         }
         if (sameAddr(src, target_)) {
-            DisturbConfig cfg; { std::lock_guard<std::mutex> lk(cfgMutex_); cfg = cfg_; } process(revStats_, revQ_, rescaleRev_, drainRev_, bwDrainRev_, buf.data(), (size_t)r, lastClient(), !cfg.clean_reverse);
+            DisturbConfig cfg; { std::lock_guard<std::mutex> lk(cfgMutex_); cfg = cfg_; } process(revStats_, revQ_, rescaleRev_, drainRev_, bwDrainRev_, buf.data(), (size_t)r, lastClient(), src, !cfg.clean_reverse);
         } else {
             {
                 std::lock_guard<std::mutex> lk(clientM_);
                 lastClient_ = src;
             }
-            process(fwdStats_, fwdQ_, rescaleFwd_, drainFwd_, bwDrainFwd_, buf.data(), (size_t)r, target_, true);
+            process(fwdStats_, fwdQ_, rescaleFwd_, drainFwd_, bwDrainFwd_, buf.data(), (size_t)r, target_, src, true);
         }
     }
 }
@@ -690,8 +701,9 @@ void UdpProxy::recvLoop() {
 void UdpProxy::senderLoop(DirStats& st, PktQueue& q) {
     Packet p;
     while (q.pop_or_wait(p, stop_)) {
-        sendto(sock_, reinterpret_cast<const char*>(p.data.data()), (int)p.data.size(), 0,
+        int wr = (int)sendto(sock_, reinterpret_cast<const char*>(p.data.data()), (int)p.data.size(), 0,
                reinterpret_cast<const sockaddr*>(&p.dst), (int)sizeof(p.dst));
+        if (wr < 0) { sendErr_.fetch_add(1); lastSendErr_.store(lastErr()); }   // 布点
         st.sent.fetch_add(1);
         st.bytes.fetch_add(p.data.size());
     }
@@ -741,6 +753,15 @@ void UdpProxy::statsLoop() {
         if (cfg.bw_enabled)
             printf("  bandwidth wave=%s range=[%.0f, %.0f] bps period=%ums duty=%.2f\n",
                    wf.c_str(), cfg.bw_min_bps, cfg.bw_max_bps, cfg.bw_period_ms, cfg.bw_duty);
+        // 布点（2026-10-13 冻结排查）：墙钟时间戳 + 线程活性 + 队列头到期距离。
+        // recvWake 停涨 = 网卡/链路无包到达；dueIn 巨大正值 = 发送线程被远期
+        // due 卡住（调度 bug）；sendErr/recvErr 增长 = socket 层异常。
+        printf("  [live] t=%lld fwdQ=%zu dueIn=%ldms revQ=%zu revDueIn=%ldms recvWake=%llu recvErr=%llu(%d) sendErr=%llu(%d)\n",
+               (long long)time(nullptr),
+               fwdQ_.size(), fwdQ_.topDueInMs(), revQ_.size(), revQ_.topDueInMs(),
+               (unsigned long long)recvWake_.load(),
+               (unsigned long long)recvErr_.load(), (int)lastRecvErr_.load(),
+               (unsigned long long)sendErr_.load(), (int)lastSendErr_.load());
         printf("------------------------------------------------------------\n");
         fflush(stdout);
     }

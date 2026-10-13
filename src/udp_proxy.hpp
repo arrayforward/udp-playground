@@ -77,6 +77,12 @@ struct DisturbConfig {
     // 队列清→自动停止标记。
     bool l4s_enabled = false;
     double l4s_threshold_ms = 1.0;
+    // CE 标记反射模式（l4s-reflect on）：标 CE 时把 L4CE 数据报回注**发送方**
+    // 而非接收方——WebRTC/org.webrtc 客户端的 ICE socket 被 SDK 独占，应用
+    // 读不到发给客户端的 L4CE，服务端的 BWE（管下行视频）又恰恰需要下行
+    // 拥塞的 CE 信号；反射回发送方反馈语义等价（tight 是客户端计数再经
+    // 报告回传，这里少一跳）。默认 off（保持发接收方的标准行为）。
+    bool l4s_reflect = false;
 
     // 报告丢弃概率（链路严重卡顿仿真）：tight Report 报文（magic 'THGT' +
     // type=8）按概率丢弃——发送端报告超时检测（3×报告周期收不到）→ btl
@@ -147,6 +153,15 @@ private:
             return false;
         }
         void wake() { cv_.notify_all(); }
+
+        // 诊断布点（2026-10-13 冻结排查）：队首距到期毫秒（空队=0，负=已到期）。
+        // 用途：区分"发送线程被远期 due 卡住"与"根本没包进队"。
+        long topDueInMs() {
+            std::lock_guard<std::mutex> lk(m_);
+            if (q_.empty()) return 0;
+            return (long)std::chrono::duration_cast<std::chrono::milliseconds>(
+                       q_.top().due - Clock::now()).count();
+        }
 
         // 带宽变化后按新旧速率比压缩所有待发报文的 due 时间，
         // 等效于把现有积压按新速率重新排程，避免旧积压继续
@@ -249,7 +264,7 @@ private:
     void process(DirStats& st, PktQueue& q, std::atomic<bool>& rescale,
                  Clock::time_point& drain, Clock::time_point& bw_drain,
                  const uint8_t* data, size_t n,
-                 const sockaddr_in& dst, bool disturb);
+                 const sockaddr_in& dst, const sockaddr_in& reflect_src, bool disturb);
     // 带宽相关配置变化时调用（须持有 cfgMutex_）：记录变化前后
     // 有效速率，置位待重排标志，由各方向下次收包时执行重排。
     void markBwChanged(double before_bw);
@@ -322,6 +337,14 @@ private:
 
     std::mutex clientM_;
     sockaddr_in lastClient_{};
+
+    // 诊断布点（2026-10-13 冻结排查）：线程活性计数。
+    // recvWake = recvfrom 每次返回（含超时/错误）；sendErr/recvErr = 系统调用失败。
+    std::atomic<uint64_t> recvWake_{0};
+    std::atomic<uint64_t> recvErr_{0};
+    std::atomic<int> lastRecvErr_{0};
+    std::atomic<uint64_t> sendErr_{0};
+    std::atomic<int> lastSendErr_{0};
 
     std::thread recvTh_;
     std::thread fwdTh_;
